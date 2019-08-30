@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 
 from moto.core.responses import BaseResponse
+
 from .models import iam_backend, User
 
 
@@ -425,11 +426,13 @@ class IamResponse(BaseResponse):
 
     def get_user(self):
         user_name = self._get_param('UserName')
-        if user_name:
-            user = iam_backend.get_user(user_name)
+        if not user_name:
+            access_key_id = self.get_current_user()
+            user = iam_backend.get_user_from_access_key_id(access_key_id)
+            if user is None:
+                user = User("default_user")
         else:
-            user = User(name='default_user')
-            # If no user is specific, IAM returns the current user
+            user = iam_backend.get_user(user_name)
 
         template = self.response_template(USER_TEMPLATE)
         return template.render(action='Get', user=user)
@@ -456,7 +459,6 @@ class IamResponse(BaseResponse):
 
     def create_login_profile(self):
         user_name = self._get_param('UserName')
-        password = self._get_param('Password')
         password = self._get_param('Password')
         user = iam_backend.create_login_profile(user_name, password)
 
@@ -1144,7 +1146,7 @@ CREATE_POLICY_VERSION_TEMPLATE = """<CreatePolicyVersionResponse xmlns="https://
     <PolicyVersion>
       <Document>{{ policy_version.document }}</Document>
       <VersionId>{{ policy_version.version_id }}</VersionId>
-      <IsDefaultVersion>{{ policy_version.is_default }}</IsDefaultVersion>
+      <IsDefaultVersion>{{ policy_version.is_default | lower }}</IsDefaultVersion>
       <CreateDate>{{ policy_version.created_iso_8601 }}</CreateDate>
     </PolicyVersion>
   </CreatePolicyVersionResult>
@@ -1158,7 +1160,7 @@ GET_POLICY_VERSION_TEMPLATE = """<GetPolicyVersionResponse xmlns="https://iam.am
     <PolicyVersion>
       <Document>{{ policy_version.document }}</Document>
       <VersionId>{{ policy_version.version_id }}</VersionId>
-      <IsDefaultVersion>{{ policy_version.is_default }}</IsDefaultVersion>
+      <IsDefaultVersion>{{ policy_version.is_default | lower }}</IsDefaultVersion>
       <CreateDate>{{ policy_version.created_iso_8601 }}</CreateDate>
     </PolicyVersion>
   </GetPolicyVersionResult>
@@ -1175,7 +1177,7 @@ LIST_POLICY_VERSIONS_TEMPLATE = """<ListPolicyVersionsResponse xmlns="https://ia
       <member>
         <Document>{{ policy_version.document }}</Document>
         <VersionId>{{ policy_version.version_id }}</VersionId>
-        <IsDefaultVersion>{{ policy_version.is_default }}</IsDefaultVersion>
+        <IsDefaultVersion>{{ policy_version.is_default | lower }}</IsDefaultVersion>
         <CreateDate>{{ policy_version.created_iso_8601 }}</CreateDate>
       </member>
       {% endfor %}
@@ -1349,6 +1351,7 @@ LIST_GROUPS_FOR_USER_TEMPLATE = """<ListGroupsForUserResponse>
             <GroupName>{{ group.name }}</GroupName>
             <GroupId>{{ group.id }}</GroupId>
             <Arn>{{ group.arn }}</Arn>
+            <CreateDate>{{ group.created_iso_8601 }}</CreateDate>
         </member>
         {% endfor %}
     </Groups>
@@ -1652,6 +1655,7 @@ LIST_GROUPS_FOR_USER_TEMPLATE = """<ListGroupsForUserResponse>
             <GroupName>{{ group.name }}</GroupName>
             <GroupId>{{ group.id }}</GroupId>
             <Arn>{{ group.arn }}</Arn>
+            <CreateDate>{{ group.created_iso_8601 }}</CreateDate>
         </member>
         {% endfor %}
     </Groups>
@@ -1787,7 +1791,7 @@ GET_ACCOUNT_AUTHORIZATION_DETAILS_TEMPLATE = """<GetAccountAuthorizationDetailsR
         {% for policy_version in policy.versions %}
           <member>
             <Document>{{ policy_version.document }}</Document>
-            <IsDefaultVersion>{{ policy_version.is_default }}</IsDefaultVersion>
+            <IsDefaultVersion>{{ policy_version.is_default | lower }}</IsDefaultVersion>
             <VersionId>{{ policy_version.version_id }}</VersionId>
             <CreateDate>{{ policy_version.created_iso_8601 }}</CreateDate>
           </member>

@@ -54,6 +54,7 @@ from .exceptions import (
     InvalidNetworkInterfaceIdError,
     InvalidParameterValueError,
     InvalidParameterValueErrorTagNull,
+    InvalidParameterValueErrorUnknownAttribute,
     InvalidPermissionNotFoundError,
     InvalidPermissionDuplicateError,
     InvalidRouteTableIdError,
@@ -141,6 +142,8 @@ AMIS = json.load(
          __name__, 'resources/amis.json'), 'r')
 )
 
+OWNER_ID = "111122223333"
+
 
 def utc_date_and_time():
     return datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
@@ -200,7 +203,7 @@ class TaggedEC2Resource(BaseModel):
 
 class NetworkInterface(TaggedEC2Resource):
     def __init__(self, ec2_backend, subnet, private_ip_address, device_index=0,
-                 public_ip_auto_assign=True, group_ids=None):
+                 public_ip_auto_assign=True, group_ids=None, description=None):
         self.ec2_backend = ec2_backend
         self.id = random_eni_id()
         self.device_index = device_index
@@ -208,6 +211,7 @@ class NetworkInterface(TaggedEC2Resource):
         self.subnet = subnet
         self.instance = None
         self.attachment_id = None
+        self.description = description
 
         self.public_ip = None
         self.public_ip_auto_assign = public_ip_auto_assign
@@ -245,11 +249,13 @@ class NetworkInterface(TaggedEC2Resource):
             subnet = None
 
         private_ip_address = properties.get('PrivateIpAddress', None)
+        description = properties.get('Description', None)
 
         network_interface = ec2_backend.create_network_interface(
             subnet,
             private_ip_address,
-            group_ids=security_group_ids
+            group_ids=security_group_ids,
+            description=description
         )
         return network_interface
 
@@ -297,6 +303,8 @@ class NetworkInterface(TaggedEC2Resource):
             return [group.id for group in self._group_set]
         elif filter_name == 'availability-zone':
             return self.subnet.availability_zone
+        elif filter_name == 'description':
+            return self.description
         else:
             return super(NetworkInterface, self).get_filter_value(
                 filter_name, 'DescribeNetworkInterfaces')
@@ -307,9 +315,9 @@ class NetworkInterfaceBackend(object):
         self.enis = {}
         super(NetworkInterfaceBackend, self).__init__()
 
-    def create_network_interface(self, subnet, private_ip_address, group_ids=None, **kwargs):
+    def create_network_interface(self, subnet, private_ip_address, group_ids=None, description=None, **kwargs):
         eni = NetworkInterface(
-            self, subnet, private_ip_address, group_ids=group_ids, **kwargs)
+            self, subnet, private_ip_address, group_ids=group_ids, description=description, **kwargs)
         self.enis[eni.id] = eni
         return eni
 
@@ -342,6 +350,12 @@ class NetworkInterfaceBackend(object):
                             if group.id in _filter_value:
                                 enis.append(eni)
                                 break
+                elif _filter == 'private-ip-address:':
+                    enis = [eni for eni in enis if eni.private_ip_address in _filter_value]
+                elif _filter == 'subnet-id':
+                    enis = [eni for eni in enis if eni.subnet.id in _filter_value]
+                elif _filter == 'description':
+                    enis = [eni for eni in enis if eni.description in _filter_value]
                 else:
                     self.raise_not_implemented_error(
                         "The filter '{0}' for DescribeNetworkInterfaces".format(_filter))
@@ -383,6 +397,10 @@ class NetworkInterfaceBackend(object):
 
 
 class Instance(TaggedEC2Resource, BotoInstance):
+    VALID_ATTRIBUTES = {'instanceType', 'kernel', 'ramdisk', 'userData', 'disableApiTermination',
+                        'instanceInitiatedShutdownBehavior', 'rootDeviceName', 'blockDeviceMapping',
+                        'productCodes', 'sourceDestCheck', 'groupSet', 'ebsOptimized', 'sriovNetSupport'}
+
     def __init__(self, ec2_backend, image_id, user_data, security_groups, **kwargs):
         super(Instance, self).__init__()
         self.ec2_backend = ec2_backend
@@ -405,6 +423,8 @@ class Instance(TaggedEC2Resource, BotoInstance):
         self.launch_time = utc_date_and_time()
         self.ami_launch_index = kwargs.get("ami_launch_index", 0)
         self.disable_api_termination = kwargs.get("disable_api_termination", False)
+        self.instance_initiated_shutdown_behavior = kwargs.get("instance_initiated_shutdown_behavior", "stop")
+        self.sriov_net_support = "simple"
         self._spot_fleet_id = kwargs.get("spot_fleet_id", None)
         self.associate_public_ip = kwargs.get("associate_public_ip", False)
         if in_ec2_classic:
@@ -788,14 +808,22 @@ class InstanceBackend(object):
         setattr(instance, key, value)
         return instance
 
-    def modify_instance_security_groups(self, instance_id, new_group_list):
+    def modify_instance_security_groups(self, instance_id, new_group_id_list):
         instance = self.get_instance(instance_id)
+        new_group_list = []
+        for new_group_id in new_group_id_list:
+            new_group_list.append(self.get_security_group_from_id(new_group_id))
         setattr(instance, 'security_groups', new_group_list)
         return instance
 
-    def describe_instance_attribute(self, instance_id, key):
-        if key == 'group_set':
+    def describe_instance_attribute(self, instance_id, attribute):
+        if attribute not in Instance.VALID_ATTRIBUTES:
+            raise InvalidParameterValueErrorUnknownAttribute(attribute)
+
+        if attribute == 'groupSet':
             key = 'security_groups'
+        else:
+            key = camelcase_to_underscores(attribute)
         instance = self.get_instance(instance_id)
         value = getattr(instance, key)
         return instance, value
@@ -1061,7 +1089,7 @@ class TagBackend(object):
 
 class Ami(TaggedEC2Resource):
     def __init__(self, ec2_backend, ami_id, instance=None, source_ami=None,
-                 name=None, description=None, owner_id=111122223333,
+                 name=None, description=None, owner_id=OWNER_ID,
                  public=False, virtualization_type=None, architecture=None,
                  state='available', creation_date=None, platform=None,
                  image_type='machine', image_location=None, hypervisor=None,
@@ -1174,7 +1202,7 @@ class AmiBackend(object):
 
         ami = Ami(self, ami_id, instance=instance, source_ami=None,
                   name=name, description=description,
-                  owner_id=context.get_current_user() if context else '111122223333')
+                  owner_id=context.get_current_user() if context else OWNER_ID)
         self.amis[ami_id] = ami
         return ami
 
@@ -1442,7 +1470,7 @@ class SecurityGroup(TaggedEC2Resource):
         self.egress_rules = [SecurityRule(-1, None, None, ['0.0.0.0/0'], [])]
         self.enis = {}
         self.vpc_id = vpc_id
-        self.owner_id = "123456789012"
+        self.owner_id = OWNER_ID
 
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
@@ -1963,7 +1991,7 @@ class Volume(TaggedEC2Resource):
 
 
 class Snapshot(TaggedEC2Resource):
-    def __init__(self, ec2_backend, snapshot_id, volume, description, encrypted=False, owner_id='123456789012'):
+    def __init__(self, ec2_backend, snapshot_id, volume, description, encrypted=False, owner_id=OWNER_ID):
         self.id = snapshot_id
         self.volume = volume
         self.description = description
@@ -2465,7 +2493,7 @@ class VPCPeeringConnectionBackend(object):
 
 class Subnet(TaggedEC2Resource):
     def __init__(self, ec2_backend, subnet_id, vpc_id, cidr_block, availability_zone, default_for_az,
-                 map_public_ip_on_launch, owner_id=111122223333, assign_ipv6_address_on_creation=False):
+                 map_public_ip_on_launch, owner_id=OWNER_ID, assign_ipv6_address_on_creation=False):
         self.ec2_backend = ec2_backend
         self.id = subnet_id
         self.vpc_id = vpc_id
@@ -2631,7 +2659,7 @@ class SubnetBackend(object):
             raise InvalidAvailabilityZoneError(availability_zone, ", ".join([zone.name for zones in RegionsAndZonesBackend.zones.values() for zone in zones]))
         subnet = Subnet(self, subnet_id, vpc_id, cidr_block, availability_zone_data,
                         default_for_az, map_public_ip_on_launch,
-                        owner_id=context.get_current_user() if context else '111122223333', assign_ipv6_address_on_creation=False)
+                        owner_id=context.get_current_user() if context else OWNER_ID, assign_ipv6_address_on_creation=False)
 
         # AWS associates a new subnet with the default Network ACL
         self.associate_default_network_acl_with_subnet(subnet_id, vpc_id)

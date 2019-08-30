@@ -838,44 +838,47 @@ def test_filter_expression():
     filter_expr.expr(row1).should.be(True)
 
     # NOT test 2
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('NOT (Id = :v0)', {}, {':v0': {'N': 8}})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('NOT (Id = :v0)', {}, {':v0': {'N': '8'}})
     filter_expr.expr(row1).should.be(False)  # Id = 8 so should be false
 
     # AND test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id > :v0 AND Subs < :v1', {}, {':v0': {'N': 5}, ':v1': {'N': 7}})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id > :v0 AND Subs < :v1', {}, {':v0': {'N': '5'}, ':v1': {'N': '7'}})
     filter_expr.expr(row1).should.be(True)
     filter_expr.expr(row2).should.be(False)
 
     # OR test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id = :v0 OR Id=:v1', {}, {':v0': {'N': 5}, ':v1': {'N': 8}})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id = :v0 OR Id=:v1', {}, {':v0': {'N': '5'}, ':v1': {'N': '8'}})
     filter_expr.expr(row1).should.be(True)
 
     # BETWEEN test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id BETWEEN :v0 AND :v1', {}, {':v0': {'N': 5}, ':v1': {'N': 10}})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id BETWEEN :v0 AND :v1', {}, {':v0': {'N': '5'}, ':v1': {'N': '10'}})
     filter_expr.expr(row1).should.be(True)
 
     # PAREN test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id = :v0 AND (Subs = :v0 OR Subs = :v1)', {}, {':v0': {'N': 8}, ':v1': {'N': 5}})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id = :v0 AND (Subs = :v0 OR Subs = :v1)', {}, {':v0': {'N': '8'}, ':v1': {'N': '5'}})
     filter_expr.expr(row1).should.be(True)
 
     # IN test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id IN :v0', {}, {':v0': {'NS': [7, 8, 9]}})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('Id IN (:v0, :v1, :v2)', {}, {
+        ':v0': {'N': '7'},
+        ':v1': {'N': '8'},
+        ':v2': {'N': '9'}})
     filter_expr.expr(row1).should.be(True)
 
     # attribute function tests (with extra spaces)
     filter_expr = moto.dynamodb2.comparisons.get_filter_expression('attribute_exists(Id) AND attribute_not_exists (User)', {}, {})
     filter_expr.expr(row1).should.be(True)
 
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('attribute_type(Id, N)', {}, {})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('attribute_type(Id, :v0)', {}, {':v0': {'S': 'N'}})
     filter_expr.expr(row1).should.be(True)
 
     # beginswith function test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('begins_with(Desc, Some)', {}, {})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('begins_with(Desc, :v0)', {}, {':v0': {'S': 'Some'}})
     filter_expr.expr(row1).should.be(True)
     filter_expr.expr(row2).should.be(False)
 
     # contains function test
-    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('contains(KV, test1)', {}, {})
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression('contains(KV, :v0)', {}, {':v0': {'S': 'test1'}})
     filter_expr.expr(row1).should.be(True)
     filter_expr.expr(row2).should.be(False)
 
@@ -916,14 +919,26 @@ def test_query_filter():
         TableName='test1',
         Item={
             'client': {'S': 'client1'},
-            'app': {'S': 'app1'}
+            'app': {'S': 'app1'},
+            'nested': {'M': {
+                'version': {'S': 'version1'},
+                'contents': {'L': [
+                    {'S': 'value1'}, {'S': 'value2'},
+                ]},
+            }},
         }
     )
     client.put_item(
         TableName='test1',
         Item={
             'client': {'S': 'client1'},
-            'app': {'S': 'app2'}
+            'app': {'S': 'app2'},
+            'nested': {'M': {
+                'version': {'S': 'version2'},
+                'contents': {'L': [
+                    {'S': 'value1'}, {'S': 'value2'},
+                ]},
+            }},
         }
     )
 
@@ -942,6 +957,18 @@ def test_query_filter():
     response = table.query(
         KeyConditionExpression=Key('client').eq('client1'),
         FilterExpression=Attr('app').contains('app')
+    )
+    assert response['Count'] == 2
+
+    response = table.query(
+        KeyConditionExpression=Key('client').eq('client1'),
+        FilterExpression=Attr('nested.version').contains('version')
+    )
+    assert response['Count'] == 2
+
+    response = table.query(
+        KeyConditionExpression=Key('client').eq('client1'),
+        FilterExpression=Attr('nested.contents[0]').eq('value1')
     )
     assert response['Count'] == 2
 
@@ -1223,7 +1250,7 @@ def test_delete_item():
     with assert_raises(ClientError) as ex:
         table.delete_item(Key={'client': 'client1', 'app': 'app1'},
                           ReturnValues='ALL_NEW')
-    
+
     # Test deletion and returning old value
     response = table.delete_item(Key={'client': 'client1', 'app': 'app1'}, ReturnValues='ALL_OLD')
     response['Attributes'].should.contain('client')
@@ -1313,6 +1340,46 @@ def test_query_missing_expr_names():
 
     resp['Count'].should.equal(1)
     resp['Items'][0]['client']['S'].should.equal('test2')
+
+
+# https://github.com/spulec/moto/issues/2328
+@mock_dynamodb2
+def test_update_item_with_list():
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+
+    # Create the DynamoDB table.
+    dynamodb.create_table(
+        TableName='Table',
+        KeySchema=[
+            {
+                'AttributeName': 'key',
+                'KeyType': 'HASH'
+            }
+        ],
+        AttributeDefinitions=[
+            {
+                'AttributeName': 'key',
+                'AttributeType': 'S'
+            },
+        ],
+        ProvisionedThroughput={
+            'ReadCapacityUnits': 1,
+            'WriteCapacityUnits': 1
+        }
+    )
+    table = dynamodb.Table('Table')
+    table.update_item(
+        Key={'key': 'the-key'},
+        AttributeUpdates={
+            'list': {'Value': [1, 2], 'Action': 'PUT'}
+        }
+    )
+
+    resp = table.get_item(Key={'key': 'the-key'})
+    resp['Item'].should.equal({
+        'key': 'the-key',
+        'list': [1, 2]
+    })
 
 
 # https://github.com/spulec/moto/issues/1342
@@ -1526,7 +1593,7 @@ def test_put_return_attributes():
         ReturnValues='NONE'
     )
     assert 'Attributes' not in r
-    
+
     r = dynamodb.put_item(
         TableName='moto-test',
         Item={'id': {'S': 'foo'}, 'col1': {'S': 'val2'}},
@@ -1543,7 +1610,7 @@ def test_put_return_attributes():
     ex.exception.response['Error']['Code'].should.equal('ValidationException')
     ex.exception.response['ResponseMetadata']['HTTPStatusCode'].should.equal(400)
     ex.exception.response['Error']['Message'].should.equal('Return values set to invalid value')
-    
+
 
 @mock_dynamodb2
 def test_query_global_secondary_index_when_created_via_update_table_resource():
@@ -1651,7 +1718,7 @@ def test_dynamodb_streams_1():
             'StreamViewType': 'NEW_AND_OLD_IMAGES'
         }
     )
-    
+
     assert 'StreamSpecification' in resp['TableDescription']
     assert resp['TableDescription']['StreamSpecification'] == {
         'StreamEnabled': True,
@@ -1659,11 +1726,11 @@ def test_dynamodb_streams_1():
     }
     assert 'LatestStreamLabel' in resp['TableDescription']
     assert 'LatestStreamArn' in resp['TableDescription']
-    
+
     resp = conn.delete_table(TableName='test-streams')
 
     assert 'StreamSpecification' in resp['TableDescription']
-    
+
 
 @mock_dynamodb2
 def test_dynamodb_streams_2():
@@ -1694,11 +1761,10 @@ def test_dynamodb_streams_2():
     assert 'LatestStreamLabel' in resp['TableDescription']
     assert 'LatestStreamArn' in resp['TableDescription']
 
-    
+
 @mock_dynamodb2
 def test_condition_expressions():
     client = boto3.client('dynamodb', region_name='us-east-1')
-    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 
     # Create the DynamoDB table.
     client.create_table(
@@ -1748,6 +1814,57 @@ def test_condition_expressions():
         ExpressionAttributeNames={
             '#nonexistent1': 'nope',
             '#nonexistent2': 'nope2'
+        }
+    )
+
+    client.put_item(
+        TableName='test1',
+        Item={
+            'client': {'S': 'client1'},
+            'app': {'S': 'app1'},
+            'match': {'S': 'match'},
+            'existing': {'S': 'existing'},
+        },
+        ConditionExpression='attribute_exists(#nonexistent) OR attribute_exists(#existing)',
+        ExpressionAttributeNames={
+            '#nonexistent': 'nope',
+            '#existing': 'existing'
+        }
+    )
+
+    client.put_item(
+        TableName='test1',
+        Item={
+            'client': {'S': 'client1'},
+            'app': {'S': 'app1'},
+            'match': {'S': 'match'},
+            'existing': {'S': 'existing'},
+        },
+        ConditionExpression='#client BETWEEN :a AND :z',
+        ExpressionAttributeNames={
+            '#client': 'client',
+        },
+        ExpressionAttributeValues={
+            ':a': {'S': 'a'},
+            ':z': {'S': 'z'},
+        }
+    )
+
+    client.put_item(
+        TableName='test1',
+        Item={
+            'client': {'S': 'client1'},
+            'app': {'S': 'app1'},
+            'match': {'S': 'match'},
+            'existing': {'S': 'existing'},
+        },
+        ConditionExpression='#client IN (:client1, :client2)',
+        ExpressionAttributeNames={
+            '#client': 'client',
+        },
+        ExpressionAttributeValues={
+            ':client1': {'S': 'client1'},
+            ':client2': {'S': 'client2'},
         }
     )
 
@@ -1802,6 +1919,119 @@ def test_condition_expressions():
                 ':match': {'S': 'match2'}
             }
         )
+
+    # Make sure update_item honors ConditionExpression as well
+    client.update_item(
+        TableName='test1',
+        Key={
+            'client': {'S': 'client1'},
+            'app': {'S': 'app1'},
+        },
+        UpdateExpression='set #match=:match',
+        ConditionExpression='attribute_exists(#existing)',
+        ExpressionAttributeNames={
+            '#existing': 'existing',
+            '#match': 'match',
+        },
+        ExpressionAttributeValues={
+            ':match': {'S': 'match'}
+        }
+    )
+
+    with assert_raises(client.exceptions.ConditionalCheckFailedException):
+        client.update_item(
+            TableName='test1',
+            Key={
+                'client': { 'S': 'client1'},
+                'app': { 'S': 'app1'},
+            },
+            UpdateExpression='set #match=:match',
+            ConditionExpression='attribute_not_exists(#existing)',
+            ExpressionAttributeValues={
+                ':match': {'S': 'match'}
+            },
+            ExpressionAttributeNames={
+                '#existing': 'existing',
+                '#match': 'match',
+            },
+        )
+
+
+@mock_dynamodb2
+def test_condition_expression__attr_doesnt_exist():
+    client = boto3.client('dynamodb', region_name='us-east-1')
+
+    client.create_table(
+        TableName='test',
+        KeySchema=[{'AttributeName': 'forum_name', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[
+            {'AttributeName': 'forum_name', 'AttributeType': 'S'},
+        ],
+        ProvisionedThroughput={'ReadCapacityUnits': 1, 'WriteCapacityUnits': 1},
+    )
+
+    client.put_item(
+        TableName='test',
+        Item={
+            'forum_name': {'S': 'foo'},
+            'ttl': {'N': 'bar'},
+        }
+    )
+
+
+    def update_if_attr_doesnt_exist():
+        # Test nonexistent top-level attribute.
+        client.update_item(
+            TableName='test',
+            Key={
+                'forum_name': {'S': 'the-key'},
+                'subject': {'S': 'the-subject'},
+            },
+            UpdateExpression='set #new_state=:new_state, #ttl=:ttl',
+            ConditionExpression='attribute_not_exists(#new_state)',
+            ExpressionAttributeNames={'#new_state': 'foobar', '#ttl': 'ttl'},
+            ExpressionAttributeValues={
+                ':new_state': {'S': 'some-value'},
+                ':ttl': {'N': '12345.67'},
+            },
+            ReturnValues='ALL_NEW',
+        )
+
+    update_if_attr_doesnt_exist()
+
+    # Second time should fail
+    with assert_raises(client.exceptions.ConditionalCheckFailedException):
+        update_if_attr_doesnt_exist()
+
+
+@mock_dynamodb2
+def test_condition_expression__or_order():
+    client = boto3.client('dynamodb', region_name='us-east-1')
+
+    client.create_table(
+        TableName='test',
+        KeySchema=[{'AttributeName': 'forum_name', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[
+            {'AttributeName': 'forum_name', 'AttributeType': 'S'},
+        ],
+        ProvisionedThroughput={'ReadCapacityUnits': 1, 'WriteCapacityUnits': 1},
+    )
+
+    # ensure that the RHS of the OR expression is not evaluated if the LHS
+    # returns true (as it would result an error)
+    client.update_item(
+        TableName='test',
+        Key={
+            'forum_name': {'S': 'the-key'},
+        },
+        UpdateExpression='set #ttl=:ttl',
+        ConditionExpression='attribute_not_exists(#ttl) OR #ttl <= :old_ttl',
+        ExpressionAttributeNames={'#ttl': 'ttl'},
+        ExpressionAttributeValues={
+            ':ttl': {'N': '6'},
+            ':old_ttl': {'N': '5'},
+        }
+    )
 
 
 @mock_dynamodb2
